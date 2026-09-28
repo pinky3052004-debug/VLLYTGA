@@ -28,7 +28,7 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           # Google Drive ဖိုင်၏ ID ကို ဤနေရာတွင် ထည့်ပါ
-          GDRIVE_FILE_ID: "YOUR_GOOGLE_DRIVE_FILE_ID_HERE"
+          GDRIVE_FILE_ID: "1OsgPXRcVIVG5rI22FQKYjBkoEV4Y9jT1"
         run: |
           python3 -u << 'EOF'
           import os
