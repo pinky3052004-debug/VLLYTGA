@@ -1,5 +1,6 @@
 import os
 import json
+import datetime
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -37,6 +38,9 @@ def create_or_update_broadcast():
     
     youtube = build("youtube", "v3", credentials=creds)
     
+    # လက်ရှိအချိန်ကို ယူ၍ Broadcast စတင်မည့်အချိန်ကို အလိုအလျောက် သတ်မှတ်ခြင်း (UTC)
+    scheduled_time = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
     # YouTube Live Broadcast အသစ် ဖန်တီးခြင်း
     print("YouTube Live Broadcast အသစ် ဖန်တီးနေပါသည်...")
     broadcast_request = youtube.liveBroadcasts().insert(
@@ -45,7 +49,7 @@ def create_or_update_broadcast():
             "snippet": {
                 "title": title,
                 "description": description,
-                "scheduledStartTime": "2026-09-22T00:00:00Z"
+                "scheduledStartTime": scheduled_time
             },
             "status": {
                 "privacyStatus": "public",
