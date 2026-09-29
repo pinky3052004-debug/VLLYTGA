@@ -230,8 +230,8 @@ jobs:
 
           PADDED_ID="$(printf '%05d' "$NEXT_ID")"
 
-          VIDEO_FILE="${PADDED_ID}.mp4"
-          THUMB_FILE="${PADDED_ID}.jpg"
+          VIDEO_FILE="1.webm"
+          THUMB_FILE="1.png"
           AUDIO_FILE="1.mp3"
 
           echo ""
@@ -477,7 +477,7 @@ jobs:
           EOF
 
       # ============================================================
-      # START YOUTUBE LIVE (Loop Audio & Mix Audio)
+      # START YOUTUBE LIVE (Loop Video 2 Times & Loop Audio Infinitely)
       # ============================================================
 
       - name: Start YouTube Live
@@ -489,14 +489,14 @@ jobs:
           AUDIO="work/${{ steps.select.outputs.audio }}"
 
           echo "=========================================="
-          echo "STARTING YOUTUBE LIVE STREAM WITH LOOPED AUDIO"
+          echo "STARTING YOUTUBE LIVE STREAM (VIDEO LOOP 2 TIMES)"
           echo "=========================================="
 
           ffmpeg \
             -hide_banner \
             -loglevel info \
             -stream_loop -1 -i "$AUDIO" \
-            -i "$VIDEO" \
+            -stream_loop 1 -i "$VIDEO" \
             -filter_complex \
               "[0:a]volume=0.55[a_looped];[1:a]volume=0.55[a_video];[a_looped][a_video]amix=inputs=2:duration=shortest[out_audio]" \
             -map 1:v:0 \
