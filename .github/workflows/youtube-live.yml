@@ -230,7 +230,7 @@ jobs:
 
           PADDED_ID="$(printf '%05d' "$NEXT_ID")"
 
-          VIDEO_FILE="${PADDED_ID}.mp4"
+          VIDEO_FILE="${PADDED_ID}.webm"
           THUMB_FILE="${PADDED_ID}.jpg"
           AUDIO_FILE="1.mp3"
 
