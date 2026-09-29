@@ -1,6 +1,5 @@
 import os
 import json
-import datetime
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -38,38 +37,31 @@ def create_or_update_broadcast():
     
     youtube = build("youtube", "v3", credentials=creds)
     
-    # လက်ရှိအချိန်ကို ယူ၍ Broadcast စတင်မည့်အချိန်ကို အလိုအလျောက် သတ်မှတ်ခြင်း (UTC)
-    scheduled_time = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    # YouTube Live Broadcast အသစ် ဖန်တီးခြင်း
-    print("YouTube Live Broadcast အသစ် ဖန်တီးနေပါသည်...")
+    # 1. YouTube Live Broadcast အသစ်ဖန်တီးခြင်း (Insert)
+    print("Creating new YouTube Live Broadcast...")
     broadcast_request = youtube.liveBroadcasts().insert(
         part="snippet,status",
         body={
             "snippet": {
                 "title": title,
                 "description": description,
-                "scheduledStartTime": scheduled_time
+                "scheduledStartTime": "2026-09-22T00:00:00Z" # လိုအပ်ပါက သတ်မှတ်နိုင်သည် (သို့မဟုတ် လက်ရှိအချိန်)
             },
             "status": {
-                "privacyStatus": "public",
+                "privacyStatus": "public", # public, unlisted သို့မဟုတ် private
                 "selfDeclaredMadeForKids": False
             }
         }
     )
     broadcast_response = broadcast_request.execute()
     broadcast_id = broadcast_response["id"]
+    print(f"Successfully created Broadcast ID: {broadcast_id}")
     
-    # Broadcast ID ကို text ဖိုင်ထဲသို့ သိမ်းဆည်းပေးခြင်း (FFmpeg အတွက် သုံးရန်)
-    with open("broadcast_id.txt", "w") as b_file:
-        b_file.write(broadcast_id)
-
-    print("--------------------------------------------------")
-    print(f"🎉 YouTube Live Broadcast အောင်မြင်စွာ ဖန်တီးပြီးပါပြီ!")
-    print(f"📌 ထွက်ရှိလာသော Broadcast ID မှာ: {broadcast_id} ဖြစ်ပါသည်။")
-    print("--------------------------------------------------")
+    # 2. Stream Key ကို Broadcast နဲ့ ချိတ်ဆက်ပေးခြင်း (Bind)
+    # မှတ်ချက် - သင့်အကောင့်တွင် bound လုပ်ရန် Stream တစ်ခုရှိရပါမည်။ 
+    # အကယ်၍ Stream Key တစ်ခုတည်းကို အမြဲသုံးချင်ပါက Bind လုပ်စရာမလိုဘဲ Video ID ကိုသာ သုံးနိုင်ပါသည်။
     
-    # Tags များကို Update လုပ်ခြင်း
+    # 3. Tags များကို Update လုပ်ခြင်း
     try:
         youtube.videos().update(
             part="snippet",
@@ -83,21 +75,21 @@ def create_or_update_broadcast():
                 }
             }
         ).execute()
-        print("✅ ဗီဒီယို Tags များကို အောင်မြင်စွာ Update လုပ်ပြီးပါပြီ။")
+        print("Video tags updated.")
     except Exception as e:
-        print(f"⚠️ သတိပေးချက် - Tags Update လုပ်၍မရပါ: {e}")
+        print(f"Warning: Tags update failed: {e}")
 
-    # Thumbnail တင်ခြင်း
+    # 4. Thumbnail တင်ခြင်း
     padded_id = f"{int(next_id):05d}"
     thumb_path = f"work/{padded_id}.jpg"
     
     if os.path.exists(thumb_path):
-        print(f"🖼️ Broadcast ID ({broadcast_id}) အတွက် Thumbnail တင်နေပါသည်...")
+        print(f"Uploading thumbnail for broadcast {broadcast_id}...")
         youtube.thumbnails().set(
             videoId=broadcast_id,
             media_body=MediaFileUpload(thumb_path)
         ).execute()
-        print("✅ Thumbnail တင်ခြင်း အောင်မြင်ပါသည်။")
+        print("Thumbnail uploaded successfully.")
 
 if __name__ == "__main__":
     create_or_update_broadcast()
