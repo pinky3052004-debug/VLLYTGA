@@ -1,177 +1,545 @@
-name: Smooth Live Stream
+name: Sequential YouTube Live
 
 on:
   workflow_dispatch:
-  repository_dispatch:
-    types: [continue-live]
 
 jobs:
-  stream:
+  youtube-live:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    env:
+      RCLONE_REMOTE: mydrive
+      GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+      YOUTUBE_STREAM_KEY: ${{ secrets.YOUTUBE_STREAM_KEY }}
+
     steps:
-      - name: Checkout Repository
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
+      - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          fetch-depth: 0
 
-      - name: Install FFmpeg
+      # ============================================================
+      # INSTALL TOOLS
+      # ============================================================
+
+      - name: Install tools
         run: |
+          set -e
+
+          echo "=========================================="
+          echo "INSTALLING TOOLS"
+          echo "=========================================="
+
           sudo apt-get update
-          sudo apt-get install -y ffmpeg curl jq
 
-      - name: Run Streaming Script
-        env:
-          YOUTUBE_STREAM_KEY: ${{ secrets.YOUTUBE_STREAM_KEY }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          # Google Drive ဖိုင်၏ ID ကို ဤနေရာတွင် ထည့်ပါ
-          GDRIVE_FILE_ID: "1OsgPXRcVIVG5rI22FQKYjBkoEV4Y9jT1"
+          sudo apt-get install -y \
+            ffmpeg \
+            curl \
+            jq \
+            unzip \
+            python3-pip
+
+          curl https://rclone.org/install.sh | sudo bash
+
+          echo ""
+          echo "rclone:"
+          rclone version
+
+          echo ""
+          echo "ffmpeg:"
+          ffmpeg -version | head -n 1
+
+          echo ""
+          echo "Python packages:"
+          pip3 install --no-cache-dir google-api-python-client google-auth-oauthlib
+
+      # ============================================================
+      # RESTORE RCLONE CONFIG
+      # ============================================================
+
+      - name: Restore rclone config
         run: |
-          python3 -u << 'EOF'
+          set -e
+
+          echo "=========================================="
+          echo "RESTORING RCLONE CONFIG"
+          echo "=========================================="
+
+          mkdir -p "$HOME/.config/rclone"
+
+          printf '%s' '${{ secrets.RCLONE_CONFIG }}' \
+            > "$HOME/.config/rclone/rclone.conf"
+
+          chmod 600 "$HOME/.config/rclone/rclone.conf"
+
+          echo "Rclone config restored."
+
+      # ============================================================
+      # CHECK RCLONE REMOTE
+      # ============================================================
+
+      - name: Test rclone remote
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "TESTING RCLONE"
+          echo "=========================================="
+
+          rclone listremotes
+
+          echo ""
+          echo "Testing remote: ${RCLONE_REMOTE}:"
+
+          rclone lsd "${RCLONE_REMOTE}:" --max-depth 1
+
+      # ============================================================
+      # CHECK GOOGLE DRIVE FOLDER
+      # ============================================================
+
+      - name: Test Google Drive folder
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "TESTING GOOGLE DRIVE FOLDER"
+          echo "=========================================="
+
+          if [ -z "$GOOGLE_DRIVE_FOLDER_ID" ]; then
+            echo "ERROR: GOOGLE_DRIVE_FOLDER_ID is empty."
+            exit 1
+          fi
+
+          echo "Folder ID configured."
+
+          rclone lsf \
+            "${RCLONE_REMOTE}:" \
+            --drive-root-folder-id "$GOOGLE_DRIVE_FOLDER_ID" \
+            --files-only \
+            --format "p"
+
+      # ============================================================
+      # DOWNLOAD main.json
+      # ============================================================
+
+      - name: Download main.json
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "DOWNLOADING main.json"
+          echo "=========================================="
+
+          mkdir -p work
+
+          rclone copyto \
+            "${RCLONE_REMOTE}:main.json" \
+            "work/main.json" \
+            --drive-root-folder-id "$GOOGLE_DRIVE_FOLDER_ID"
+
+          if [ ! -f work/main.json ]; then
+            echo "ERROR: main.json was not downloaded."
+            exit 1
+          fi
+
+          echo ""
+          echo "main.json:"
+          cat work/main.json
+
+          echo ""
+
+          # Validate JSON
+          jq empty work/main.json
+
+          echo "JSON validation: OK"
+
+      # ============================================================
+      # PREPARE already_live.txt
+      # ============================================================
+
+      - name: Prepare already live record
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "PREPARING already_live.txt"
+          echo "=========================================="
+
+          if [ ! -f already_live.txt ]; then
+            touch already_live.txt
+          fi
+
+          echo ""
+          echo "Already live:"
+          cat already_live.txt || true
+
+      # ============================================================
+      # FIND NEXT ID
+      # ============================================================
+
+      - name: Find next video
+        id: select
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "FINDING NEXT VIDEO"
+          echo "=========================================="
+
+          jq -r '.[].id' work/main.json \
+            | sort -n \
+            > work/all_ids.txt
+
+          echo ""
+          echo "IDs in main.json:"
+          cat work/all_ids.txt
+
+          NEXT_ID=""
+
+          while IFS= read -r ID; do
+
+            if ! grep -Fxq "$ID" already_live.txt; then
+
+              NEXT_ID="$ID"
+              break
+
+            fi
+
+          done < work/all_ids.txt
+
+          if [ -z "$NEXT_ID" ]; then
+
+            echo ""
+            echo "=========================================="
+            echo "NO MORE VIDEOS"
+            echo "=========================================="
+
+            echo "has_next=false" >> "$GITHUB_OUTPUT"
+
+            exit 0
+
+          fi
+
+          PADDED_ID="$(printf '%05d' "$NEXT_ID")"
+
+          VIDEO_FILE="${PADDED_ID}.mp4"
+          THUMB_FILE="${PADDED_ID}.jpg"
+
+          echo ""
+          echo "Selected ID     : $NEXT_ID"
+          echo "Padded ID       : $PADDED_ID"
+          echo "Video           : $VIDEO_FILE"
+          echo "Thumbnail       : $THUMB_FILE"
+
+          TITLE="$(jq -r \
+            --arg id "$NEXT_ID" \
+            '.[] | select(.id == $id) | .title' \
+            work/main.json)"
+
+          DESCRIPTION="$(jq -r \
+            --arg id "$NEXT_ID" \
+            '.[] | select(.id == $id) | .description' \
+            work/main.json)"
+
+          TAGS_JSON="$(jq -c \
+            --arg id "$NEXT_ID" \
+            '.[] | select(.id == $id) | .video_tags' \
+            work/main.json)"
+
+          if [ -z "$TITLE" ] || [ "$TITLE" = "null" ]; then
+            echo "ERROR: title not found for id $NEXT_ID"
+            exit 1
+          fi
+
+          if [ -z "$DESCRIPTION" ] || [ "$DESCRIPTION" = "null" ]; then
+            echo "ERROR: description not found for id $NEXT_ID"
+            exit 1
+          fi
+
+          if [ -z "$TAGS_JSON" ] || [ "$TAGS_JSON" = "null" ]; then
+            echo "ERROR: video_tags not found for id $NEXT_ID"
+            exit 1
+          fi
+
+          printf '%s' "$TITLE" \
+            > work/title.txt
+
+          printf '%s' "$DESCRIPTION" \
+            > work/description.txt
+
+          printf '%s' "$TAGS_JSON" \
+            > work/tags.json
+
+          echo "has_next=true" >> "$GITHUB_OUTPUT"
+          echo "id=$NEXT_ID" >> "$GITHUB_OUTPUT"
+          echo "padded_id=$PADDED_ID" >> "$GITHUB_OUTPUT"
+          echo "video=$VIDEO_FILE" >> "$GITHUB_OUTPUT"
+          echo "thumbnail=$THUMB_FILE" >> "$GITHUB_OUTPUT"
+
+      # ============================================================
+      # CHECK SELECTED FILES IN GOOGLE DRIVE
+      # ============================================================
+
+      - name: Check selected files
+        if: steps.select.outputs.has_next == 'true'
+        run: |
+          set -e
+
+          VIDEO="${{ steps.select.outputs.video }}"
+          THUMB="${{ steps.select.outputs.thumbnail }}"
+
+          echo "=========================================="
+          echo "CHECKING GOOGLE DRIVE FILES"
+          echo "=========================================="
+
+          if ! rclone lsf \
+            "${RCLONE_REMOTE}:" \
+            --drive-root-folder-id "$GOOGLE_DRIVE_FOLDER_ID" \
+            --files-only \
+            --include "$VIDEO" \
+            | grep -Fxq "$VIDEO"; then
+
+            echo "ERROR: $VIDEO not found in Google Drive."
+            exit 1
+          fi
+
+          if ! rclone lsf \
+            "${RCLONE_REMOTE}:" \
+            --drive-root-folder-id "$GOOGLE_DRIVE_FOLDER_ID" \
+            --files-only \
+            --include "$THUMB" \
+            | grep -Fxq "$THUMB"; then
+
+            echo "ERROR: $THUMB not found in Google Drive."
+            exit 1
+          fi
+
+          echo "Files verified successfully."
+
+      # ============================================================
+      # DOWNLOAD VIDEO & THUMBNAIL
+      # ============================================================
+
+      - name: Download video and thumbnail
+        if: steps.select.outputs.has_next == 'true'
+        run: |
+          set -e
+
+          VIDEO="${{ steps.select.outputs.video }}"
+          THUMB="${{ steps.select.outputs.thumbnail }}"
+
+          echo "=========================================="
+          echo "DOWNLOADING ASSETS"
+          echo "=========================================="
+
+          rclone copyto \
+            "${RCLONE_REMOTE}:${VIDEO}" \
+            "work/${VIDEO}" \
+            --drive-root-folder-id "$GOOGLE_DRIVE_FOLDER_ID" \
+            --progress
+
+          rclone copyto \
+            "${RCLONE_REMOTE}:${THUMB}" \
+            "work/${THUMB}" \
+            --drive-root-folder-id "$GOOGLE_DRIVE_FOLDER_ID" \
+            --progress
+
+      # ============================================================
+      # UPDATE YOUTUBE METADATA & THUMBNAIL VIA API
+      # ============================================================
+
+      - name: Update YouTube Metadata and Thumbnail
+        if: steps.select.outputs.has_next == 'true'
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          YOUTUBE_BROADCAST_ID: ${{ secrets.YOUTUBE_BROADCAST_ID }}
+          NEXT_ID: ${{ steps.select.outputs.id }}
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "UPDATING YOUTUBE METADATA VIA API"
+          echo "=========================================="
+
+          python3 - << 'EOF'
           import os
-          import time
-          import subprocess
           import json
-          import urllib.request
+          from google.oauth2.credentials import Credentials
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
 
-          stream_key = os.environ["YOUTUBE_STREAM_KEY"]
-          file_id = os.environ["GDRIVE_FILE_ID"]
-          direct_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-          
-          repo = os.environ["GITHUB_REPOSITORY"]
-          gh_token = os.environ["GH_PAT"]
+          client_id = os.environ.get("YOUTUBE_CLIENT_ID")
+          client_secret = os.environ.get("YOUTUBE_CLIENT_SECRET")
+          refresh_token = os.environ.get("YOUTUBE_REFRESH_TOKEN")
+          broadcast_id = os.environ.get("YOUTUBE_BROADCAST_ID")
+          next_id = os.environ.get("NEXT_ID")
 
-          status_file = "stream_status.json"
+          with open("work/main.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
 
-          def read_status():
-              if os.path.exists(status_file):
-                  with open(status_file, "r") as f:
-                      return json.load(f)
-              return {"status": "idle", "current_position": 0, "vm2_ready": False}
+          video_item = None
+          for item in data:
+              if str(item.get("id")) == str(next_id):
+                  video_item = item
+                  break
 
-          def write_status(data):
-              with open(status_file, "w") as f:
-                  json.dump(data, f, indent=2)
-              # GitHub သို့ ချက်ချင်း commit/push လုပ်ရန်
-              os.system("git config user.name 'Stream Bot'")
-              os.system("git config user.email 'bot@users.noreply.github.com'")
-              os.system(f"git add {status_file}")
-              os.system("git commit -m 'Update stream status [skip ci]' || true")
-              os.system("git push || true")
+          if not video_item:
+              print(f"Error: ID {next_id} not found in main.json")
+              exit(1)
 
-          # -------------------------------------------------------------
-          # Determine if this is VM 1 or VM 2
-          # -------------------------------------------------------------
-          current_state = read_status()
-          start_pos = current_state.get("current_position", 0)
+          title = video_item.get("title")
+          description = video_item.get("description")
+          tags = video_item.get("video_tags", [])
 
-          # အကယ်၍ start_pos က 0 ထက်ကြီးနေလျှင် ဒါသည် VM 2 ဖြစ်သည်
-          is_vm2 = start_pos > 0
+          creds = Credentials(
+              None,
+              refresh_token=refresh_token,
+              client_id=client_id,
+              client_secret=client_secret,
+              token_uri="https://oauth2.googleapis.com/token"
+          )
 
-          if is_vm2:
-              print(f"[*] I am VM 2. Resuming from position: {start_pos} seconds")
-              # VM 2 အသင့်ဖြစ်ကြောင်း ချက်ချင်း အချက်ပြမည်
-              current_state["vm2_ready"] = True
-              current_state["status"] = "vm2_active"
-              write_status(current_state)
-          else:
-              print("[*] I am VM 1. Starting from the beginning (0).")
-              current_state["status"] = "vm1_active"
-              current_state["current_position"] = 0
-              current_state["vm2_ready"] = False
-              write_status(current_state)
+          youtube = build("youtube", "v3", credentials=creds)
 
-          # -------------------------------------------------------------
-          # FFmpeg Command Setup (Direct GDrive URL, No local download!)
-          # -------------------------------------------------------------
-          cmd = [
-              "ffmpeg",
-              "-hide_banner",
-              "-loglevel", "info",
-              "-ss", str(start_pos),
-              "-i", direct_url,
-              "-c:v", "libx264",
-              "-preset", "veryfast",
-              "-tune", "zerolatency",
-              "-pix_fmt", "yuv420p",
-              "-r", "30",
-              "-g", "60",
-              "-keyint_min", "60",
-              "-b:v", "4500k",
-              "-maxrate", "4500k",
-              "-bufsize", "9000k",
-              "-c:a", "aac",
-              "-b:a", "128k",
-              "-ar", "44100",
-              "-f", "flv",
-              f"rtmps://a.rtmps.youtube.com/live2/{stream_key}"
-          ]
+          # Update Title & Description
+          youtube.liveBroadcasts().update(
+              part="snippet",
+              body={
+                  "id": broadcast_id,
+                  "snippet": {
+                      "title": title,
+                      "description": description
+                  }
+              }
+          ).execute()
+          print("Broadcast metadata updated.")
 
-          print(f"[*] Starting FFmpeg stream...")
-          process = subprocess.Popen(cmd)
-
-          # -------------------------------------------------------------
-          # Monitoring Loop (Handling the Handover logic)
-          # -------------------------------------------------------------
-          # VM 1 အတွက်: ဥပမာ - မိနစ် ၄၀ (စက္ကန့် ၂၄၀၀) ရောက်လျှင် VM 2 ကို ကြိုခေါ်မည်
-          triggered_vm2 = False
-          start_time = time.time()
-
+          # Update Tags
           try:
-              while process.poll() is None:
-                  time.sleep(10)
-                  elapsed_live_time = int(time.time() - start_time)
-                  current_video_pos = start_pos + elapsed_live_time
+              youtube.videos().update(
+                  part="snippet",
+                  body={
+                      "id": broadcast_id,
+                      "snippet": {
+                          "title": title,
+                          "description": description,
+                          "categoryId": "24",
+                          "tags": tags
+                      }
+                  }
+              ).execute()
+              print("Video tags updated.")
+          except Exception as e:
+              print(f"Warning: Tags update failed: {e}")
 
-                  # အကယ်၍ ကျွန်ုပ်တို့သည် VM 1 ဖြစ်ပြီး အချိန်က မိနစ် ၄၀ (၂၄၀၀ စက္ကန့်) ရောက်လာလျှင်
-                  if not is_vm2 and elapsed_live_time >= 2400 and not triggered_vm2:
-                      print("[*] VM 1: Reached 40 minutes. Triggering VM 2 early for download/prep...")
-                      
-                      # GitHub API သို့ repository_dispatch လှမ်းပို့၍ VM 2 ကို နှိုးမည်
-                      req_data = json.dumps({"event_type": "continue-live"}).encode("utf-8")
-                      req = urllib.request.Request(
-                          f"https://api.github.com/repos/{repo}/dispatches",
-                          data=req_data,
-                          headers={
-                              "Authorization": f"Bearer {gh_token}",
-                              "Accept": "application/vnd.github+json",
-                              "Content-Type": "application/json"
-                          }
-                      )
-                      try:
-                          urllib.request.urlopen(req)
-                          print("[*] VM 2 successfully triggered!")
-                      except Exception as e:
-                          print(f"[!] Failed to trigger VM 2: {e}")
-                      
-                      triggered_vm2 = True
+          # Update Thumbnail
+          padded_id = f"{int(next_id):05d}"
+          thumb_path = f"work/{padded_id}.jpg"
 
-                  # အကယ်၍ ကျွန်ုပ်တို့သည် VM 1 ဖြစ်ပြီး, မိနစ် ၅၅ (၃၃၀၀ စက္ကန့်) ရောက်လာလျှင် VM 2 အသင့်ဖြစ်မဖြစ် စစ်ဆေးမည်
-                  if not is_vm2 and elapsed_live_time >= 3300:
-                      print("[*] VM 1: Checking if VM 2 is ready...")
-                      # Git pull လုပ်၍ status အသစ်ကို ယူမည်
-                      os.system("git pull --rebase || true")
-                      st = read_status()
-                      
-                      if st.get("vm2_ready", False):
-                          print("[*] VM 1: VM 2 is ready! Handing over the current spot...")
-                          st["current_position"] = current_video_pos
-                          st["status"] = "handover_complete"
-                          write_status(st)
-                          print("[*] VM 1: Spot handed over. Stopping VM 1 stream gracefully.")
-                          break
-
-                  # အကယ်၍ ကျွန်ုပ်တို့သည် VM 2 ဖြစ်နေပြီး, အခြား VM အသစ်တစ်ခုက ထပ်တက်လာခဲ့လျှင် (လိုအပ်ပါက ဤနေရာတွင် ဆက်လက်ထိန်းချုပ်နိုင်သည်)
-          
-          except KeyboardInterrupt:
-              pass
-          finally:
-              if process.poll() is None:
-                  process.terminate()
-                  process.wait()
-          
-          print("[*] Streaming session for this VM ended cleanly.")
+          if os.path.exists(thumb_path):
+              youtube.thumbnails().set(
+                  videoId=broadcast_id,
+                  media_body=MediaFileUpload(thumb_path)
+              ).execute()
+              print("Thumbnail uploaded.")
           EOF
+
+      # ============================================================
+      # START YOUTUBE LIVE
+      # ============================================================
+
+      - name: Start YouTube Live
+        if: steps.select.outputs.has_next == 'true'
+        run: |
+          set -e
+
+          VIDEO="work/${{ steps.select.outputs.video }}"
+
+          echo "=========================================="
+          echo "STARTING YOUTUBE LIVE STREAM"
+          echo "=========================================="
+
+          ffmpeg \
+            -hide_banner \
+            -loglevel info \
+            -re \
+            -i "$VIDEO" \
+            -c:v libx264 \
+            -preset veryfast \
+            -tune zerolatency \
+            -pix_fmt yuv420p \
+            -r 30 \
+            -g 60 \
+            -keyint_min 60 \
+            -b:v 4500k \
+            -maxrate 4500k \
+            -bufsize 9000k \
+            -c:a aac \
+            -b:a 128k \
+            -ar 44100 \
+            -f flv \
+            "rtmps://a.rtmps.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
+
+      # ============================================================
+      # MARK AS LIVE & COMMIT
+      # ============================================================
+
+      - name: Mark as already live
+        if: success() && steps.select.outputs.has_next == 'true'
+        run: |
+          set -e
+
+          ID="${{ steps.select.outputs.id }}"
+
+          if ! grep -Fxq "$ID" already_live.txt; then
+            echo "$ID" >> already_live.txt
+          fi
+
+          sort -n -o already_live.txt already_live.txt
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add already_live.txt
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+          else
+            git commit -m "Mark ${{ steps.select.outputs.id }} as already live"
+            git push
+          fi
+
+      # ============================================================
+      # FINAL SUMMARY
+      # ============================================================
+
+      - name: Final summary
+        if: always()
+        run: |
+          echo ""
+          echo "=================================================="
+          echo "FINAL SUMMARY"
+          echo "=================================================="
+
+          if [ "${{ steps.select.outputs.has_next }}" = "true" ]; then
+            echo "ID        : ${{ steps.select.outputs.id }}"
+            echo "Video     : ${{ steps.select.outputs.video }}"
+            echo "Thumbnail : ${{ steps.select.outputs.thumbnail }}"
+          else
+            echo "No video selected."
+          fi
+
+          echo ""
+          echo "Already Live:"
+          cat already_live.txt || true
+          echo "=================================================="
