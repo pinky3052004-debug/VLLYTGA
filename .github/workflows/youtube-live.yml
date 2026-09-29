@@ -232,12 +232,14 @@ jobs:
 
           VIDEO_FILE="${PADDED_ID}.mp4"
           THUMB_FILE="${PADDED_ID}.jpg"
+          AUDIO_FILE="1.mp3"
 
           echo ""
           echo "Selected ID     : $NEXT_ID"
           echo "Padded ID       : $PADDED_ID"
           echo "Video           : $VIDEO_FILE"
           echo "Thumbnail       : $THUMB_FILE"
+          echo "Audio           : $AUDIO_FILE"
 
           TITLE="$(jq -r \
             --arg id "$NEXT_ID" \
@@ -283,6 +285,7 @@ jobs:
           echo "padded_id=$PADDED_ID" >> "$GITHUB_OUTPUT"
           echo "video=$VIDEO_FILE" >> "$GITHUB_OUTPUT"
           echo "thumbnail=$THUMB_FILE" >> "$GITHUB_OUTPUT"
+          echo "audio=$AUDIO_FILE" >> "$GITHUB_OUTPUT"
 
       # ============================================================
       # CHECK SELECTED FILES IN GOOGLE DRIVE
@@ -295,6 +298,7 @@ jobs:
 
           VIDEO="${{ steps.select.outputs.video }}"
           THUMB="${{ steps.select.outputs.thumbnail }}"
+          AUDIO="${{ steps.select.outputs.audio }}"
 
           echo "=========================================="
           echo "CHECKING GOOGLE DRIVE FILES"
@@ -322,19 +326,31 @@ jobs:
             exit 1
           fi
 
+          if ! rclone lsf \
+            "${RCLONE_REMOTE}:" \
+            --drive-root-folder-id "$GOOGLE_DRIVE_FOLDER_ID" \
+            --files-only \
+            --include "$AUDIO" \
+            | grep -Fxq "$AUDIO"; then
+
+            echo "ERROR: $AUDIO not found in Google Drive."
+            exit 1
+          fi
+
           echo "Files verified successfully."
 
       # ============================================================
-      # DOWNLOAD VIDEO & THUMBNAIL
+      # DOWNLOAD ASSETS (VIDEO, THUMBNAIL, AUDIO)
       # ============================================================
 
-      - name: Download video and thumbnail
+      - name: Download video, thumbnail and audio
         if: steps.select.outputs.has_next == 'true'
         run: |
           set -e
 
           VIDEO="${{ steps.select.outputs.video }}"
           THUMB="${{ steps.select.outputs.thumbnail }}"
+          AUDIO="${{ steps.select.outputs.audio }}"
 
           echo "=========================================="
           echo "DOWNLOADING ASSETS"
@@ -349,6 +365,12 @@ jobs:
           rclone copyto \
             "${RCLONE_REMOTE}:${THUMB}" \
             "work/${THUMB}" \
+            --drive-root-folder-id "$GOOGLE_DRIVE_FOLDER_ID" \
+            --progress
+
+          rclone copyto \
+            "${RCLONE_REMOTE}:${AUDIO}" \
+            "work/${AUDIO}" \
             --drive-root-folder-id "$GOOGLE_DRIVE_FOLDER_ID" \
             --progress
 
@@ -455,7 +477,7 @@ jobs:
           EOF
 
       # ============================================================
-      # START YOUTUBE LIVE
+      # START YOUTUBE LIVE (Loop Audio & Mix Audio)
       # ============================================================
 
       - name: Start YouTube Live
@@ -464,16 +486,21 @@ jobs:
           set -e
 
           VIDEO="work/${{ steps.select.outputs.video }}"
+          AUDIO="work/${{ steps.select.outputs.audio }}"
 
           echo "=========================================="
-          echo "STARTING YOUTUBE LIVE STREAM"
+          echo "STARTING YOUTUBE LIVE STREAM WITH LOOPED AUDIO"
           echo "=========================================="
 
           ffmpeg \
             -hide_banner \
             -loglevel info \
-            -re \
+            -stream_loop -1 -i "$AUDIO" \
             -i "$VIDEO" \
+            -filter_complex \
+              "[0:a]volume=0.55[a_looped];[1:a]volume=0.55[a_video];[a_looped][a_video]amix=inputs=2:duration=shortest[out_audio]" \
+            -map 1:v:0 \
+            -map "[out_audio]" \
             -c:v libx264 \
             -preset veryfast \
             -tune zerolatency \
@@ -535,6 +562,7 @@ jobs:
             echo "ID        : ${{ steps.select.outputs.id }}"
             echo "Video     : ${{ steps.select.outputs.video }}"
             echo "Thumbnail : ${{ steps.select.outputs.thumbnail }}"
+            echo "Audio     : ${{ steps.select.outputs.audio }}"
           else
             echo "No video selected."
           fi
